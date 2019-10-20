@@ -142,23 +142,23 @@ func (w *WebsocketProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	// httputil.ReverseProxy. See http://en.wikipedia.org/wiki/X-Forwarded-For
 	// for more information
 	// TODO: use RFC7239 http://tools.ietf.org/html/rfc7239
-	if clientIP, _, err := net.SplitHostPort(req.RemoteAddr); err == nil {
-		// If we aren't the first proxy retain prior
-		// X-Forwarded-For information as a comma+space
-		// separated list and fold multiple headers into one.
-		if prior, ok := req.Header["X-Forwarded-For"]; ok {
-			clientIP = strings.Join(prior, ", ") + ", " + clientIP
-		}
-		requestHeader.Set("X-Forwarded-For", clientIP)
-	}
+	// if clientIP, _, err := net.SplitHostPort(req.RemoteAddr); err == nil {
+	// If we aren't the first proxy retain prior
+	// X-Forwarded-For information as a comma+space
+	// separated list and fold multiple headers into one.
+	// if prior, ok := req.Header["X-Forwarded-For"]; ok {
+	// 	clientIP = strings.Join(prior, ", ") + ", " + clientIP
+	// }
+	// requestHeader.Set("X-Forwarded-For", clientIP)
+	// }
 
 	// Set the originating protocol of the incoming HTTP request. The SSL might
 	// be terminated on our site and because we doing proxy adding this would
 	// be helpful for applications on the backend.
-	requestHeader.Set("X-Forwarded-Proto", "http")
-	if req.TLS != nil {
-		requestHeader.Set("X-Forwarded-Proto", "https")
-	}
+	// requestHeader.Set("X-Forwarded-Proto", "http")
+	// if req.TLS != nil {
+	// 	requestHeader.Set("X-Forwarded-Proto", "https")
+	// }
 
 	// Enable the director to copy any additional headers it desires for
 	// forwarding to the remote server.

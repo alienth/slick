@@ -11,6 +11,9 @@ type Hub struct {
 	broadcast  chan *message
 	register   chan *Client
 	unregister chan *Client
+
+	slackClient *Client
+	slackServer *Client
 }
 
 func newHub() *Hub {
@@ -22,10 +25,25 @@ func newHub() *Hub {
 	}
 }
 
+func (h *Hub) clearSlack() {
+	if h.slackClient != nil {
+		h.slackClient.Close()
+	}
+
+	if h.slackServer != nil {
+		h.slackServer.Close()
+	}
+}
+
 func (h *Hub) run() {
 	for {
 		select {
 		case client := <-h.register:
+			if client.clientType == SlackServer {
+				h.slackServer = client
+			} else if client.clientType == SlackClient {
+				h.slackClient = client
+			}
 			h.clients[client] = true
 		case client := <-h.unregister:
 			if _, ok := h.clients[client]; ok {

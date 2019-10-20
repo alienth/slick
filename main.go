@@ -237,6 +237,7 @@ func (w *WebsocketProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	w.hub.clearSlack()
 	log.Println("Connections established! Creating clients.")
 	backendClient := &Client{hub: w.hub, conn: connBackend, send: make(chan message, 10), clientType: SlackServer}
 	slackClient := &Client{hub: w.hub, conn: connPub, send: make(chan message, 10), clientType: SlackClient}

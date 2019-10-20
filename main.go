@@ -4,10 +4,8 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"net/url"
-	"strings"
 
 	"github.com/gorilla/websocket"
 )

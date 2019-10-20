@@ -132,9 +132,6 @@ func (w *WebsocketProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	if req.Host != "" {
 		requestHeader.Set("Host", req.Host)
 	}
-	requestHeader.Set("Host", "echo.websocket.org")
-	// requestHeader.Set("Origin", "echo.websocket.org")
-	requestHeader.Del("Origin")
 
 	// Pass X-Forwarded-For headers too, code below is a part of
 	// httputil.ReverseProxy. See http://en.wikipedia.org/wiki/X-Forwarded-For
@@ -164,7 +161,6 @@ func (w *WebsocketProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		w.Director(req, requestHeader)
 	}
 
-	fmt.Println(requestHeader)
 	// Connect to the backend URL, also pass the headers we get from the requst
 	// together with the Forwarded headers we prepared above.
 	// TODO: support multiplexing on the same backend connection instead of

@@ -122,6 +122,12 @@ func (w *WebsocketProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	if w.hub.slackClient != nil {
+		log.Println("Slack client already active. Rejecting new connection.")
+		http.Error(rw, "internal server error (code: 1)", http.StatusInternalServerError)
+		return
+	}
+
 	if w.Backend == nil {
 		log.Println("websocketproxy: backend function is not defined")
 		http.Error(rw, "internal server error (code: 1)", http.StatusInternalServerError)

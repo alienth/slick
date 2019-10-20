@@ -47,6 +47,11 @@ func (h *Hub) run() {
 			h.clients[client] = true
 		case client := <-h.unregister:
 			if _, ok := h.clients[client]; ok {
+				if client.clientType == SlackServer {
+					h.slackServer = nil
+				} else if client.clientType == SlackClient {
+					h.slackClient = nil
+				}
 				delete(h.clients, client)
 				close(client.send)
 			}

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	_ "net/http/pprof"
 )
 
 // func serveReverseProxy(rw http.ResponseWriter, req *http.Request) {
@@ -23,11 +24,15 @@ import (
 
 func main() {
 	// http.HandleFunc("/", serveReverseProxy)
+	go func() {
+		log.Println(http.ListenAndServe("localhost:8081", nil))
+	}()
 	u, err := url.Parse("wss://wss.lb.slack-msgs.com/")
 	if err != nil {
 		panic(err)
 	}
-	if err := http.ListenAndServeTLS("127.0.0.1:443", "cert.pem", "key.pem", NewProxy(u)); err != nil {
+	proxy := ProxyHandler(u)
+	if err := http.ListenAndServeTLS("127.0.0.1:443", "cert.pem", "key.pem", proxy); err != nil {
 		panic(err)
 	}
 }
@@ -69,6 +74,10 @@ type WebsocketProxy struct {
 	//  Dialer contains options for connecting to the backend WebSocket server.
 	//  If nil, DefaultDialer is used.
 	Dialer *websocket.Dialer
+
+	// A third-party websocket conn which we will copy backend messages to
+	// and allow writing from.
+	Third *websocket.Conn
 }
 
 // ProxyHandler returns a new http.Handler interface that reverse proxies the
@@ -91,6 +100,13 @@ func NewProxy(target *url.URL) *WebsocketProxy {
 
 // ServeHTTP implements the http.Handler that proxies WebSocket connections.
 func (w *WebsocketProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+	log.Println(req.URL)
+	if req.URL.Path == "/third" {
+		log.Println("Handling third-party connection.")
+		w.ServeThird(rw, req)
+		return
+	}
+
 	if w.Backend == nil {
 		log.Println("websocketproxy: backend function is not defined")
 		http.Error(rw, "internal server error (code: 1)", http.StatusInternalServerError)
@@ -210,12 +226,8 @@ func (w *WebsocketProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 
 	errClient := make(chan error, 1)
 	errBackend := make(chan error, 1)
-	replicateWebsocketConn := func(dst, src *websocket.Conn, errc chan error) {
+	replicateWebsocketConn := func(dst, src *websocket.Conn, third bool, errc chan error) {
 		for {
-			if src == nil || dst == nil {
-				time.Sleep(time.Second * 1)
-				continue
-			}
 			msgType, msg, err := src.ReadMessage()
 			fmt.Println(string(msg))
 			if err != nil {
@@ -234,21 +246,34 @@ func (w *WebsocketProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 				errc <- err
 				break
 			}
+			if w.Third != nil && third {
+				log.Println("Writing to third...")
+				err = w.Third.WriteMessage(msgType, msg)
+				if err != nil {
+					errc <- err
+					break
+				}
+				log.Println("Done writing to third.")
+			}
 		}
 	}
 
 	// From backend to client
-	go replicateWebsocketConn(connPub, connBackend, errClient)
+	go replicateWebsocketConn(connPub, connBackend, true, errClient)
 
 	// From client to backend
-	go replicateWebsocketConn(connBackend, connPub, errBackend)
+	go replicateWebsocketConn(connBackend, connPub, false, errBackend)
 
-	var third *websocket.Conn
-	// From backend to third
-	go replicateWebsocketConn(connBackend, third, errClient)
+	go func() {
+		for {
+			if w.Third == nil {
+				time.Sleep(time.Second * 1)
+			}
+		}
 
-	// From third to backend
-	go replicateWebsocketConn(third, connBackend, errBackend)
+		// From third to backend
+		go replicateWebsocketConn(connBackend, w.Third, false, errClient)
+	}()
 
 	var message string
 	select {
@@ -258,8 +283,30 @@ func (w *WebsocketProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		message = "websocketproxy: Error when copying from client to backend: %v"
 
 	}
-	if e, ok := err.(*websocket.CloseError); !ok || e.Code == websocket.CloseAbnormalClosure {
-		log.Printf(message, err)
+	// if e, ok := err.(*websocket.CloseError); !ok || e.Code == websocket.CloseAbnormalClosure {
+	log.Printf(message, err)
+}
+
+// ServeThird serves a third-party
+func (w *WebsocketProxy) ServeThird(rw http.ResponseWriter, req *http.Request) {
+	upgrader := w.Upgrader
+	if w.Upgrader == nil {
+		upgrader = DefaultUpgrader
+	}
+
+	c, err := upgrader.Upgrade(rw, req, nil)
+	if err != nil {
+		log.Printf("websocketproxy: couldn't upgrade %s", err)
+		return
+	}
+	defer c.Close()
+
+	w.Third = c
+	err = c.WriteMessage(websocket.TextMessage, []byte("hello there"))
+	if err != nil {
+		log.Println(err)
+	}
+	for {
 	}
 }
 

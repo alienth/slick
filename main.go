@@ -1,205 +1,271 @@
 package main
 
 import (
-	"crypto/tls"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
+
+	"github.com/gorilla/websocket"
 )
 
-func serveReverseProxy(rw http.ResponseWriter, req *http.Request) {
-	req.URL.Host = "echo.websocket.org"
-	req.Host = "echo.websocket.org"
-	req.URL.Scheme = "https"
-	req.Header.Set("Host", "echo.websocket.org")
-	fmt.Println(req.Host)
-	proxy := NewSingleHostReverseProxy(req.URL)
-	proxy.ServeHTTP(rw, req)
-}
+// func serveReverseProxy(rw http.ResponseWriter, req *http.Request) {
+// 	req.URL.Host = "echo.websocket.org"
+// 	req.Host = "echo.websocket.org"
+// 	req.URL.Scheme = "https"
+// 	req.Header.Set("Host", "echo.websocket.org")
+// 	fmt.Println(req.Host)
+// 	proxy := NewSingleHostReverseProxy(req.URL)
+// 	proxy.ServeHTTP(rw, req)
+// }
 
 func main() {
-	http.HandleFunc("/", serveReverseProxy)
-	if err := http.ListenAndServe("127.0.0.1:8080", nil); err != nil {
+	// http.HandleFunc("/", serveReverseProxy)
+	u, err := url.Parse("ws://echo.websocket.org/?encoding=text")
+	if err != nil {
+		panic(err)
+	}
+	if err := http.ListenAndServe("127.0.0.1:8080", NewProxy(u)); err != nil {
 		panic(err)
 	}
 }
 
-// ReverseProxy is a WebSocket reverse proxy. It will not work with a regular
-// HTTP request, so it is the caller's responsiblity to ensure the incoming
-// request is a WebSocket request.
-type ReverseProxy struct {
-	// Director must be a function which modifies
-	// the request into a new request to be sent
-	// using Transport. Its response is then copied
-	// back to the original client unmodified.
-	Director func(*http.Request)
-
-	// Dial specifies the dial function for dialing the proxied
-	// server over tcp.
-	// If Dial is nil, net.Dial is used.
-	Dial func(network, addr string) (net.Conn, error)
-
-	// TLSClientConfig specifies the TLS configuration to use for 'wss'.
-	// If nil, the default configuration is used.
-	TLSClientConfig *tls.Config
-
-	// ErrorLog specifies an optional logger for errors
-	// that occur when attempting to proxy the request.
-	// If nil, logging goes to os.Stderr via the log package's
-	// standard logger.
-	ErrorLog *log.Logger
+func checkOrigin(r *http.Request) bool {
+	return true
 }
 
-// stolen from net/http/httputil. singleJoiningSlash ensures that the route
-// '/a/' joined with '/b' becomes '/a/b'.
-func singleJoiningSlash(a, b string) string {
-	aslash := strings.HasSuffix(a, "/")
-	bslash := strings.HasPrefix(b, "/")
-	switch {
-	case aslash && bslash:
-		return a + b[1:]
-	case !aslash && !bslash:
-		return a + "/" + b
+var (
+	// DefaultUpgrader specifies the parameters for upgrading an HTTP
+	// connection to a WebSocket connection.
+	DefaultUpgrader = &websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+		CheckOrigin:     checkOrigin,
 	}
-	return a + b
+
+	// DefaultDialer is a dialer with all fields set to the default zero values.
+	DefaultDialer = websocket.DefaultDialer
+)
+
+// WebsocketProxy is an HTTP Handler that takes an incoming WebSocket
+// connection and proxies it to another server.
+type WebsocketProxy struct {
+	// Director, if non-nil, is a function that may copy additional request
+	// headers from the incoming WebSocket connection into the output headers
+	// which will be forwarded to another server.
+	Director func(incoming *http.Request, out http.Header)
+
+	// Backend returns the backend URL which the proxy uses to reverse proxy
+	// the incoming WebSocket connection. Request is the initial incoming and
+	// unmodified request.
+	Backend func(*http.Request) *url.URL
+
+	// Upgrader specifies the parameters for upgrading a incoming HTTP
+	// connection to a WebSocket connection. If nil, DefaultUpgrader is used.
+	Upgrader *websocket.Upgrader
+
+	//  Dialer contains options for connecting to the backend WebSocket server.
+	//  If nil, DefaultDialer is used.
+	Dialer *websocket.Dialer
 }
 
-// NewSingleHostReverseProxy returns a new websocket ReverseProxy. The path
-// rewrites follow the same rules as the httputil.ReverseProxy. If the target
-// url has the path '/foo' and the incoming request '/bar', the request path
-// will be updated to '/foo/bar' before forwarding.
-// Scheme should specify if 'ws' or 'wss' should be used.
-func NewSingleHostReverseProxy(target *url.URL) *ReverseProxy {
-	targetQuery := target.RawQuery
-	director := func(req *http.Request) {
-		req.URL.Scheme = target.Scheme
-		req.URL.Host = target.Host
-		req.URL.Path = singleJoiningSlash(target.Path, req.URL.Path)
-		if targetQuery == "" || req.URL.RawQuery == "" {
-			req.URL.RawQuery = targetQuery + req.URL.RawQuery
-		} else {
-			req.URL.RawQuery = targetQuery + "&" + req.URL.RawQuery
-		}
+// ProxyHandler returns a new http.Handler interface that reverse proxies the
+// request to the given target.
+func ProxyHandler(target *url.URL) http.Handler { return NewProxy(target) }
+
+// NewProxy returns a new Websocket reverse proxy that rewrites the
+// URL's to the scheme, host and base path provider in target.
+func NewProxy(target *url.URL) *WebsocketProxy {
+	backend := func(r *http.Request) *url.URL {
+		// Shallow copy
+		u := *target
+		u.Fragment = r.URL.Fragment
+		u.Path = r.URL.Path
+		u.RawQuery = r.URL.RawQuery
+		return &u
 	}
-	return &ReverseProxy{Director: director}
+	return &WebsocketProxy{Backend: backend}
 }
 
-// Function to implement the http.Handler interface.
-func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	logFunc := log.Printf
-	if p.ErrorLog != nil {
-		logFunc = p.ErrorLog.Printf
-	}
-
-	if !IsWebSocketRequest(r) {
-		http.Error(w, "Cannot handle non-WebSocket requests", 500)
-		logFunc("Received a request that was not a WebSocket request")
+// ServeHTTP implements the http.Handler that proxies WebSocket connections.
+func (w *WebsocketProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+	if w.Backend == nil {
+		log.Println("websocketproxy: backend function is not defined")
+		http.Error(rw, "internal server error (code: 1)", http.StatusInternalServerError)
 		return
 	}
 
-	outreq := new(http.Request)
-	// shallow copying
-	*outreq = *r
-	p.Director(outreq)
-	host := outreq.URL.Host
+	backendURL := w.Backend(req)
+	if backendURL == nil {
+		log.Println("websocketproxy: backend URL is nil")
+		http.Error(rw, "internal server error (code: 2)", http.StatusInternalServerError)
+		return
+	}
 
-	if clientIP, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+	dialer := w.Dialer
+	if w.Dialer == nil {
+		dialer = DefaultDialer
+	}
+
+	// Pass headers from the incoming request to the dialer to forward them to
+	// the final destinations.
+	requestHeader := http.Header{}
+	if origin := req.Header.Get("Origin"); origin != "" {
+		requestHeader.Add("Origin", origin)
+	}
+	for _, prot := range req.Header[http.CanonicalHeaderKey("Sec-WebSocket-Protocol")] {
+		requestHeader.Add("Sec-WebSocket-Protocol", prot)
+	}
+	// for _, ext := range req.Header[http.CanonicalHeaderKey("Sec-WebSocket-Extensions")] {
+	// 	requestHeader.Add("Sec-WebSocket-Extensions", ext)
+	// }
+	// for _, key := range req.Header[http.CanonicalHeaderKey("Sec-WebSocket-Key")] {
+	// 	requestHeader.Add("Sec-WebSocket-Key", key)
+	// }
+	// for _, ver := range req.Header[http.CanonicalHeaderKey("Sec-WebSocket-Version")] {
+	// 	requestHeader.Add("Sec-WebSocket-Version", ver)
+	// }
+	for _, cookie := range req.Header[http.CanonicalHeaderKey("Cookie")] {
+		requestHeader.Add("Cookie", cookie)
+	}
+	if req.Host != "" {
+		requestHeader.Set("Host", req.Host)
+	}
+	requestHeader.Set("Host", "echo.websocket.org")
+	// requestHeader.Set("Origin", "echo.websocket.org")
+	requestHeader.Del("Origin")
+
+	// Pass X-Forwarded-For headers too, code below is a part of
+	// httputil.ReverseProxy. See http://en.wikipedia.org/wiki/X-Forwarded-For
+	// for more information
+	// TODO: use RFC7239 http://tools.ietf.org/html/rfc7239
+	if clientIP, _, err := net.SplitHostPort(req.RemoteAddr); err == nil {
 		// If we aren't the first proxy retain prior
 		// X-Forwarded-For information as a comma+space
 		// separated list and fold multiple headers into one.
-		if prior, ok := outreq.Header["X-Forwarded-For"]; ok {
+		if prior, ok := req.Header["X-Forwarded-For"]; ok {
 			clientIP = strings.Join(prior, ", ") + ", " + clientIP
 		}
-		outreq.Header.Set("X-Forwarded-For", clientIP)
+		requestHeader.Set("X-Forwarded-For", clientIP)
 	}
 
-	dial := p.Dial
-	if dial == nil {
-		dial = net.Dial
+	// Set the originating protocol of the incoming HTTP request. The SSL might
+	// be terminated on our site and because we doing proxy adding this would
+	// be helpful for applications on the backend.
+	requestHeader.Set("X-Forwarded-Proto", "http")
+	if req.TLS != nil {
+		requestHeader.Set("X-Forwarded-Proto", "https")
 	}
 
-	// if host does not specify a port, use the default http port
-	if !strings.Contains(host, ":") {
-		if outreq.URL.Scheme == "wss" {
-			host = host + ":443"
+	// Enable the director to copy any additional headers it desires for
+	// forwarding to the remote server.
+	if w.Director != nil {
+		w.Director(req, requestHeader)
+	}
+
+	fmt.Println(requestHeader)
+	// Connect to the backend URL, also pass the headers we get from the requst
+	// together with the Forwarded headers we prepared above.
+	// TODO: support multiplexing on the same backend connection instead of
+	// opening a new TCP connection time for each request. This should be
+	// optional:
+	// http://tools.ietf.org/html/draft-ietf-hybi-websocket-multiplexing-01
+	connBackend, resp, err := dialer.Dial(backendURL.String(), requestHeader)
+	if err != nil {
+		log.Printf("websocketproxy: couldn't dial to remote backend url %s", err)
+		if resp != nil {
+			// If the WebSocket handshake fails, ErrBadHandshake is returned
+			// along with a non-nil *http.Response so that callers can handle
+			// redirects, authentication, etcetera.
+			if err := copyResponse(rw, resp); err != nil {
+				log.Printf("websocketproxy: couldn't write response after failed remote backend handshake: %s", err)
+			}
 		} else {
-			host = host + ":80"
+			http.Error(rw, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
 		}
+		return
+	}
+	defer connBackend.Close()
+
+	upgrader := w.Upgrader
+	if w.Upgrader == nil {
+		upgrader = DefaultUpgrader
 	}
 
-	if outreq.URL.Scheme == "wss" {
-		var tlsConfig *tls.Config
-		if p.TLSClientConfig == nil {
-			tlsConfig = &tls.Config{}
-		} else {
-			tlsConfig = p.TLSClientConfig
-		}
-		dial = func(network, address string) (net.Conn, error) {
-			return tls.Dial("tcp", host, tlsConfig)
-		}
+	// Only pass those headers to the upgrader.
+	upgradeHeader := http.Header{}
+	if hdr := resp.Header.Get("Sec-Websocket-Protocol"); hdr != "" {
+		upgradeHeader.Set("Sec-Websocket-Protocol", hdr)
+	}
+	if hdr := resp.Header.Get("Set-Cookie"); hdr != "" {
+		upgradeHeader.Set("Set-Cookie", hdr)
 	}
 
-	d, err := dial("tcp", host)
+	// Now upgrade the existing incoming request to a WebSocket connection.
+	// Also pass the header that we gathered from the Dial handshake.
+	connPub, err := upgrader.Upgrade(rw, req, upgradeHeader)
 	if err != nil {
-		http.Error(w, "Error forwarding request.", 500)
-		logFunc("Error dialing websocket backend %s: %v", outreq.URL, err)
+		log.Printf("websocketproxy: couldn't upgrade %s", err)
 		return
 	}
-	// All request generated by the http package implement this interface.
-	hj, ok := w.(http.Hijacker)
-	if !ok {
-		http.Error(w, "Not a hijacker?", 500)
-		return
-	}
-	// Hijack() tells the http package not to do anything else with the connection.
-	// After, it bcomes this functions job to manage it. `nc` is of type *net.Conn.
-	nc, _, err := hj.Hijack()
-	if err != nil {
-		logFunc("Hijack error: %v", err)
-		return
-	}
-	defer nc.Close() // must close the underlying net connection after hijacking
-	defer d.Close()
+	defer connPub.Close()
 
-	// write the modified incoming request to the dialed connection
-	err = outreq.Write(d)
-	if err != nil {
-		logFunc("Error copying request to target: %v", err)
-		return
-	}
-	errc := make(chan error, 2)
-	cp := func(dst io.Writer, src io.Reader) {
-		rd := io.TeeReader(src, os.Stdout)
-		_, err := io.Copy(dst, rd)
-		errc <- err
-	}
-	go cp(d, nc)
-	go cp(nc, d)
-	<-errc
-}
-
-// IsWebSocketRequest returns a boolean indicating whether the request has the
-// headers of a WebSocket handshake request.
-func IsWebSocketRequest(r *http.Request) bool {
-	contains := func(key, val string) bool {
-		vv := strings.Split(r.Header.Get(key), ",")
-		for _, v := range vv {
-			if val == strings.ToLower(strings.TrimSpace(v)) {
-				return true
+	errClient := make(chan error, 1)
+	errBackend := make(chan error, 1)
+	replicateWebsocketConn := func(dst, src *websocket.Conn, errc chan error) {
+		for {
+			msgType, msg, err := src.ReadMessage()
+			if err != nil {
+				m := websocket.FormatCloseMessage(websocket.CloseNormalClosure, fmt.Sprintf("%v", err))
+				if e, ok := err.(*websocket.CloseError); ok {
+					if e.Code != websocket.CloseNoStatusReceived {
+						m = websocket.FormatCloseMessage(e.Code, e.Text)
+					}
+				}
+				errc <- err
+				dst.WriteMessage(websocket.CloseMessage, m)
+				break
+			}
+			err = dst.WriteMessage(msgType, msg)
+			if err != nil {
+				errc <- err
+				break
 			}
 		}
-		return false
 	}
-	if !contains("Connection", "upgrade") {
-		return false
+
+	go replicateWebsocketConn(connPub, connBackend, errClient)
+	go replicateWebsocketConn(connBackend, connPub, errBackend)
+
+	var message string
+	select {
+	case err = <-errClient:
+		message = "websocketproxy: Error when copying from backend to client: %v"
+	case err = <-errBackend:
+		message = "websocketproxy: Error when copying from client to backend: %v"
+
 	}
-	if !contains("Upgrade", "websocket") {
-		return false
+	if e, ok := err.(*websocket.CloseError); !ok || e.Code == websocket.CloseAbnormalClosure {
+		log.Printf(message, err)
 	}
-	return true
+}
+
+func copyHeader(dst, src http.Header) {
+	for k, vv := range src {
+		for _, v := range vv {
+			dst.Add(k, v)
+		}
+	}
+}
+
+func copyResponse(rw http.ResponseWriter, resp *http.Response) error {
+	copyHeader(rw.Header(), resp.Header)
+	rw.WriteHeader(resp.StatusCode)
+	defer resp.Body.Close()
+
+	_, err := io.Copy(rw, resp.Body)
+	return err
 }

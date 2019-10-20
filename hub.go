@@ -69,10 +69,12 @@ func (h *Hub) run() {
 					send()
 				} else if message.authorType == SlackClient && client.clientType == SlackServer {
 					send()
-				} else if message.authorType == ThirdParty && client.clientType == SlackServer {
-					send()
-				} else if message.authorType == SlackServer && client.clientType == ThirdParty {
-					send()
+				} else if message.messageType == websocket.TextMessage { // Only forward text messages to/fro third parties.
+					if message.authorType == ThirdParty && client.clientType == SlackServer {
+						send()
+					} else if message.authorType == SlackServer && client.clientType == ThirdParty {
+						send()
+					}
 				}
 			}
 		}

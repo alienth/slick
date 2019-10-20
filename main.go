@@ -24,11 +24,11 @@ import (
 
 func main() {
 	// http.HandleFunc("/", serveReverseProxy)
-	u, err := url.Parse("ws://echo.websocket.org/?encoding=text")
+	u, err := url.Parse("wss://wss.lb.slack-msgs.com/")
 	if err != nil {
 		panic(err)
 	}
-	if err := http.ListenAndServe("127.0.0.1:8080", NewProxy(u)); err != nil {
+	if err := http.ListenAndServeTLS("127.0.0.1:443", "cert.pem", "key.pem", NewProxy(u)); err != nil {
 		panic(err)
 	}
 }

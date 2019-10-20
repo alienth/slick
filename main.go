@@ -1,12 +1,10 @@
 package main
 
 import (
-	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
-	"time"
 
 	"github.com/gorilla/websocket"
 	_ "net/http/pprof"
@@ -31,10 +29,29 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	proxy := ProxyHandler(u)
+	hub := newHub()
+	go hub.run()
+	proxy := ProxyHandler(u, hub)
 	if err := http.ListenAndServeTLS("127.0.0.1:443", "cert.pem", "key.pem", proxy); err != nil {
 		panic(err)
 	}
+}
+
+// serveWs handles websocket requests from third parties.
+func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
+	upgrader := DefaultUpgrader
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+	client := &Client{hub: hub, conn: conn, send: make(chan message, 10), clientType: ThirdParty}
+	client.hub.register <- client
+
+	// Allow collection of memory referenced by the caller by doing all work in
+	// new goroutines.
+	go client.writePump()
+	go client.readPump()
 }
 
 func checkOrigin(r *http.Request) bool {
@@ -75,18 +92,17 @@ type WebsocketProxy struct {
 	//  If nil, DefaultDialer is used.
 	Dialer *websocket.Dialer
 
-	// A third-party websocket conn which we will copy backend messages to
-	// and allow writing from.
-	Third *websocket.Conn
+	// The hub which the clients are added to
+	hub *Hub
 }
 
 // ProxyHandler returns a new http.Handler interface that reverse proxies the
 // request to the given target.
-func ProxyHandler(target *url.URL) http.Handler { return NewProxy(target) }
+func ProxyHandler(target *url.URL, hub *Hub) http.Handler { return NewProxy(target, hub) }
 
 // NewProxy returns a new Websocket reverse proxy that rewrites the
 // URL's to the scheme, host and base path provider in target.
-func NewProxy(target *url.URL) *WebsocketProxy {
+func NewProxy(target *url.URL, hub *Hub) *WebsocketProxy {
 	backend := func(r *http.Request) *url.URL {
 		// Shallow copy
 		u := *target
@@ -95,15 +111,14 @@ func NewProxy(target *url.URL) *WebsocketProxy {
 		u.RawQuery = r.URL.RawQuery
 		return &u
 	}
-	return &WebsocketProxy{Backend: backend}
+	return &WebsocketProxy{Backend: backend, hub: hub}
 }
 
 // ServeHTTP implements the http.Handler that proxies WebSocket connections.
 func (w *WebsocketProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	log.Println(req.URL)
 	if req.URL.Path == "/third" {
-		log.Println("Handling third-party connection.")
-		w.ServeThird(rw, req)
+		serveWs(w.hub, rw, req)
 		return
 	}
 
@@ -199,7 +214,6 @@ func (w *WebsocketProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		}
 		return
 	}
-	defer connBackend.Close()
 
 	upgrader := w.Upgrader
 	if w.Upgrader == nil {
@@ -222,92 +236,16 @@ func (w *WebsocketProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		log.Printf("websocketproxy: couldn't upgrade %s", err)
 		return
 	}
-	defer connPub.Close()
 
-	errClient := make(chan error, 1)
-	errBackend := make(chan error, 1)
-	replicateWebsocketConn := func(dst, src *websocket.Conn, third bool, errc chan error) {
-		for {
-			msgType, msg, err := src.ReadMessage()
-			fmt.Println(string(msg))
-			if err != nil {
-				m := websocket.FormatCloseMessage(websocket.CloseNormalClosure, fmt.Sprintf("%v", err))
-				if e, ok := err.(*websocket.CloseError); ok {
-					if e.Code != websocket.CloseNoStatusReceived {
-						m = websocket.FormatCloseMessage(e.Code, e.Text)
-					}
-				}
-				errc <- err
-				dst.WriteMessage(websocket.CloseMessage, m)
-				break
-			}
-			err = dst.WriteMessage(msgType, msg)
-			if err != nil {
-				errc <- err
-				break
-			}
-			if w.Third != nil && third {
-				log.Println("Writing to third...")
-				err = w.Third.WriteMessage(msgType, msg)
-				if err != nil {
-					errc <- err
-					break
-				}
-				log.Println("Done writing to third.")
-			}
-		}
-	}
-
-	// From backend to client
-	go replicateWebsocketConn(connPub, connBackend, true, errClient)
-
-	// From client to backend
-	go replicateWebsocketConn(connBackend, connPub, false, errBackend)
-
-	go func() {
-		for {
-			if w.Third == nil {
-				time.Sleep(time.Second * 1)
-			}
-		}
-
-		// From third to backend
-		go replicateWebsocketConn(connBackend, w.Third, false, errClient)
-	}()
-
-	var message string
-	select {
-	case err = <-errClient:
-		message = "websocketproxy: Error when copying from backend to client: %v"
-	case err = <-errBackend:
-		message = "websocketproxy: Error when copying from client to backend: %v"
-
-	}
-	// if e, ok := err.(*websocket.CloseError); !ok || e.Code == websocket.CloseAbnormalClosure {
-	log.Printf(message, err)
-}
-
-// ServeThird serves a third-party
-func (w *WebsocketProxy) ServeThird(rw http.ResponseWriter, req *http.Request) {
-	upgrader := w.Upgrader
-	if w.Upgrader == nil {
-		upgrader = DefaultUpgrader
-	}
-
-	c, err := upgrader.Upgrade(rw, req, nil)
-	if err != nil {
-		log.Printf("websocketproxy: couldn't upgrade %s", err)
-		return
-	}
-	defer c.Close()
-
-	w.Third = c
-	err = c.WriteMessage(websocket.TextMessage, []byte("hello there"))
-	if err != nil {
-		log.Println(err)
-	}
-	for {
-	}
+	log.Println("Connections established! Creating clients.")
+	backendClient := &Client{hub: w.hub, conn: connBackend, send: make(chan message, 10), clientType: SlackServer}
+	slackClient := &Client{hub: w.hub, conn: connPub, send: make(chan message, 10), clientType: SlackClient}
+	backendClient.hub.register <- backendClient
+	slackClient.hub.register <- slackClient
+	go backendClient.writePump()
+	go backendClient.readPump()
+	go slackClient.writePump()
+	go slackClient.readPump()
 }
 
 func copyHeader(dst, src http.Header) {

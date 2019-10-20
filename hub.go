@@ -1,0 +1,57 @@
+package main
+
+type message struct {
+	authorType  ClientType
+	message     []byte
+	messageType int
+}
+
+type Hub struct {
+	clients    map[*Client]bool
+	broadcast  chan *message
+	register   chan *Client
+	unregister chan *Client
+}
+
+func newHub() *Hub {
+	return &Hub{
+		broadcast:  make(chan *message),
+		clients:    make(map[*Client]bool),
+		register:   make(chan *Client),
+		unregister: make(chan *Client),
+	}
+}
+
+func (h *Hub) run() {
+	for {
+		select {
+		case client := <-h.register:
+			h.clients[client] = true
+		case client := <-h.unregister:
+			if _, ok := h.clients[client]; ok {
+				delete(h.clients, client)
+				close(client.send)
+			}
+		case message := <-h.broadcast:
+			for client := range h.clients {
+				send := func() {
+					select {
+					case client.send <- *message:
+					default:
+						close(client.send)
+						delete(h.clients, client)
+					}
+				}
+				if message.authorType == SlackServer && client.clientType == SlackClient {
+					send()
+				} else if message.authorType == SlackClient && client.clientType == SlackServer {
+					send()
+				} else if message.authorType == ThirdParty && client.clientType == SlackServer {
+					send()
+				} else if message.authorType == SlackServer && client.clientType == ThirdParty {
+					send()
+				}
+			}
+		}
+	}
+}

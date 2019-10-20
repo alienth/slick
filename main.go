@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -211,7 +212,12 @@ func (w *WebsocketProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	errBackend := make(chan error, 1)
 	replicateWebsocketConn := func(dst, src *websocket.Conn, errc chan error) {
 		for {
+			if src == nil || dst == nil {
+				time.Sleep(time.Second * 1)
+				continue
+			}
 			msgType, msg, err := src.ReadMessage()
+			fmt.Println(string(msg))
 			if err != nil {
 				m := websocket.FormatCloseMessage(websocket.CloseNormalClosure, fmt.Sprintf("%v", err))
 				if e, ok := err.(*websocket.CloseError); ok {
@@ -231,8 +237,18 @@ func (w *WebsocketProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		}
 	}
 
+	// From backend to client
 	go replicateWebsocketConn(connPub, connBackend, errClient)
+
+	// From client to backend
 	go replicateWebsocketConn(connBackend, connPub, errBackend)
+
+	var third *websocket.Conn
+	// From backend to third
+	go replicateWebsocketConn(connBackend, third, errClient)
+
+	// From third to backend
+	go replicateWebsocketConn(third, connBackend, errBackend)
 
 	var message string
 	select {

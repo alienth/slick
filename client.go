@@ -60,8 +60,7 @@ func (c *Client) readPump() {
 			break
 		}
 		msg := &message{authorType: c.clientType, message: m, messageType: messageType}
-		log.Println("Got ", string(msg.message))
-		// message = bytes.TrimSpace(bytes.Replace(message, newline, space, -1))
+		log.Println("Got ", string(msg.message), messageType)
 		c.hub.broadcast <- msg
 	}
 }

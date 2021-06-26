@@ -1,5 +1,11 @@
 package main
 
+import (
+	"strings"
+
+	"github.com/gorilla/websocket"
+)
+
 type message struct {
 	authorType  ClientType
 	message     []byte
@@ -56,6 +62,7 @@ func (h *Hub) run() {
 				close(client.send)
 			}
 		case message := <-h.broadcast:
+			// messageFilter(message)
 			for client := range h.clients {
 				send := func() {
 					select {
@@ -77,6 +84,16 @@ func (h *Hub) run() {
 					}
 				}
 			}
+		}
+	}
+}
+
+func messageFilter(m *message) {
+	msg := string(m.message)
+
+	if strings.Contains(msg, "\"type\":\"hello\"") {
+		if !strings.Contains(msg, "alienth@reddit.com") || !strings.Contains(msg, "T025CK1T9") {
+			panic("Unexpected connection.. killing.")
 		}
 	}
 }
